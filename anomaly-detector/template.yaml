@@ -1,0 +1,364 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  FlowLogLogGroupArn:
+    Type: String
+  FlowLogLogGroupName:
+    Type: String
+  VpcCidr:
+    Type: String
+  LambdaCodeBucket:
+    Type: String
+  LambdaCodePath:
+    Type: String
+  LambdaSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  LambdaSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  ListenerPort:
+    Type: Number
+  ListenerProtocol:
+    Type: Number
+  MinPacketsPerBin:
+    Type: Number
+    Default: 12000
+  TimeWindowSeconds:
+    Type: Number
+    Default: 3600
+  BinSeconds:
+    Type: Number
+    Default: 60
+  MinZScore:
+    Type: Number
+    Default: 3.0
+  MetricsNamespace:
+    Type: String
+Resources:
+  FlowLogAnomaliesTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+  LambdaKmsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaKmsPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${LambdaLogGroupKey}'
+      Roles:
+        - !Ref LambdaRole
+  LambdaLogsPolicy:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "GetQueryResults does not support resource scoping"
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaLogsPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:StartQuery
+            Resource: !Ref FlowLogLogGroupArn
+          - Effect: Allow
+            Action:
+              - logs:GetQueryResults
+            Resource: '*'
+      Roles:
+        - !Ref LambdaRole
+  LambdaSnsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaSnsPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource:
+              - !GetAtt FlowLogAnomaliesTopic.TopicArn
+              - !GetAtt DeadLetterTopic.TopicArn
+      Roles:
+        - !Ref LambdaRole
+  LambdaCloudWatchPolicy:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "PutMetricData can only be scoped by condition"
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaCloudWatchPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'cloudwatch:namespace': !Ref MetricsNamespace
+      Roles:
+        - !Ref LambdaRole
+  LambdaTimestreamPolicy:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "DescribeEndpoints does not support resource scoping"
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaTimestreamPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - timestream:DescribeEndpoints
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - timestream:WriteRecords
+              - timestream:Select
+            Resource: !Sub 'arn:aws:timestream:${AWS::Region}:${AWS::AccountId}:database/${FlowLogBinDB}/table/${FlowLogBinTable.Name}' 
+      Roles:
+        - !Ref LambdaRole
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+  Lambda:
+    DependsOn: 
+      - LambdaKmsPolicy
+      - LambdaLogsPolicy
+      - LambdaSnsPolicy
+      - LambdaCloudWatchPolicy
+      - LambdaTimestreamPolicy
+      - LambdaLogGroup
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      Handler: lambda.handler
+      MemorySize: 256
+      Role: !GetAtt LambdaRole.Arn
+      ReservedConcurrentExecutions: 1
+      Runtime: python3.10
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodePath
+      VpcConfig:
+        SubnetIds: !Ref LambdaSubnetIds
+        SecurityGroupIds: !Ref LambdaSecurityGroupIds
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterTopic.TopicArn
+      Environment:
+        Variables:
+          VPC_CIDR: !Ref VpcCidr
+          LOG_GROUP_NAME: !Ref FlowLogLogGroupName
+          LISTENER_PORT: !Ref ListenerPort
+          LISTENER_PROTOCOL: !Ref ListenerProtocol
+          MIN_PACKETS_PER_BIN: !Ref MinPacketsPerBin
+          TIME_WINDOW_SECONDS: !Ref TimeWindowSeconds
+          BIN_SECONDS: !Ref BinSeconds
+          MIN_ZSCORE: !Ref MinZScore
+          DATABASE_NAME: !Ref FlowLogBinDB
+          DATABASE_TABLE: !GetAtt FlowLogBinTable.Name
+          ANOMALIES_TOPIC_ARN: !GetAtt FlowLogAnomaliesTopic.TopicArn
+          METRICS_NAMESPACE: !Ref MetricsNamespace
+  DeadLetterTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup 
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}'
+      RetentionInDays: 7
+      KmsKeyId: !GetAtt LambdaLogGroupKey.Arn
+  LambdaLogGroupKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties: 
+      AliasName: !Sub 'alias/${AWS::StackName}-logs'
+      TargetKeyId: !Ref LambdaLogGroupKey
+  LambdaLogGroupKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CloudWatch Logs encryption key
+      EnableKeyRotation: true
+      PendingWindowInDays: 20
+      KeyPolicy:
+        Version: 2012-10-17
+        Statement:
+          - Sid: Enable IAM Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow CloudWatch Logs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:ReEncrypt
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                "kms:EncryptionContext:aws:logs:arn":
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}"
+  EventRule:
+    Type: AWS::Events::Rule
+    DependsOn: EventRulePolicy
+    Properties: 
+      EventBusName: default
+      Name: !GetAtt LambdaRunnerStateMachine.Name
+      ScheduleExpression: 'rate(1 minute)'
+      State: ENABLED
+      Targets: 
+        - Id: 0
+          Arn: !Ref LambdaRunnerStateMachine
+          RoleArn: !GetAtt EventRuleRole.Arn
+  EventRuleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+  EventRulePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: EventRulePolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: !Ref LambdaRunnerStateMachine
+      Roles:
+        - !Ref EventRuleRole
+  StateMachineLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt Lambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: states.amazonaws.com
+      SourceArn: !Ref LambdaRunnerStateMachine
+  FlowLogBinDB:
+    Type: AWS::Timestream::Database
+  FlowLogBinTable:
+    Type: AWS::Timestream::Table
+    Properties:
+      DatabaseName: !Ref FlowLogBinDB
+      RetentionProperties:
+        MemoryStoreRetentionPeriodInHours: "2"
+        MagneticStoreRetentionPeriodInDays: "1"
+      TableName: packet-bins
+  LambdaRunnerStateMachinePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaRunnerStateMachinePolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt Lambda.Arn
+      Roles:
+        - !Ref LambdaRunnerStateMachineRole
+  LambdaRunnerStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+  LambdaRunnerStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: LambdaRunnerStateMachinePolicy
+    Properties:
+      RoleArn: !GetAtt LambdaRunnerStateMachineRole.Arn
+      DefinitionString: !Sub |
+        {
+          "StartAt": "DetectAnomalies",
+          "States": {
+            "DetectAnomalies": {
+              "Type": "Parallel",
+              "End": true,
+              "Branches": [
+                {
+                  "StartAt": "DetectAnomaly",
+                  "States": {
+                    "DetectAnomaly": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${Lambda.Arn}",
+                        "InvocationType": "Event"
+                      },
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "Pause",
+                  "States": {
+                    "Pause": {
+                      "Type": "Wait",
+                      "Seconds": 30,
+                      "Next": "DetectAnomaly2"
+                    },
+                    "DetectAnomaly2": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${Lambda.Arn}",
+                        "InvocationType": "Event"
+                      },
+                      "End": true
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+Outputs:
+  FlowLogAnomaliesTopicArn:
+    Value: !GetAtt FlowLogAnomaliesTopic.TopicArn

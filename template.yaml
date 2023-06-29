@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: A solution that automates the lifecycle of NACL rules
+Parameters:
+  TemplateUrlBase:
+    Type: String
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  VpcCidr:
+    Type: String
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+  AnomalyDetectorLambdaCodeBucket:
+    Type: String
+  AnomalyDetectorLambdaCodePath:
+    Type: String
+  NaclUpdaterLambdaCodeBucket:
+    Type: String
+  NaclUpdaterLambdaCodePath:
+    Type: String
+  LambdaSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  LambdaSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  ListenerPort:
+    Type: Number
+  ListenerProtocol:
+    Type: Number
+    Default: 6
+    Description: IANA protocol number
+  MaxNaclRules:
+    Type: Number
+    Default: 20
+  MetricsNamespace:
+    Type: String
+  AllowListBucket:
+    Type: String
+    Default: ''
+  AllowListKey:
+    Type: String
+    Default: ''
+  MinPacketsPerBin:
+    Type: Number
+    Default: 12000
+  MinZScore:
+    Type: Number
+    Default: 3.0
+Resources:
+  NaclUpdater:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        VpcId: !Ref VpcId
+        SubnetId1: !Ref SubnetId1
+        SubnetId2: !Ref SubnetId2
+        LambdaCodeBucket: !Ref NaclUpdaterLambdaCodeBucket
+        LambdaCodePath: !Ref NaclUpdaterLambdaCodePath
+        LambdaSecurityGroupIds: !Join [ ',', !Ref LambdaSecurityGroupIds ]
+        LambdaSubnetIds: !Join [ ',', !Ref LambdaSubnetIds ]
+        ListenerPort: !Ref ListenerPort
+        MaxNaclRules: !Ref MaxNaclRules
+        MetricsNamespace: !Ref MetricsNamespace
+        AllowListBucket: !Ref AllowListBucket
+        AllowListKey: !Ref AllowListKey
+        FlowLogAnomaliesTopicArn: !GetAtt [AnomalyDetector, Outputs.FlowLogAnomaliesTopicArn]
+        FlowLogLogGroupName: !GetAtt [FlowLog, Outputs.LogGroupName]
+      TemplateURL: !Sub "${TemplateUrlBase}/nacl-updater/template.yaml"
+      TimeoutInMinutes: 10
+  FlowLog:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        SubnetId1: !Ref SubnetId1
+        SubnetId2: !Ref SubnetId2
+        ListenerPort: !Ref ListenerPort
+        ListenerProtocol: !Ref ListenerProtocol
+        MetricsNamespace: !Ref MetricsNamespace
+      TemplateURL: !Sub "${TemplateUrlBase}/flow-log/template.yaml"
+      TimeoutInMinutes: 10
+  AnomalyDetector:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        FlowLogLogGroupName: !GetAtt [FlowLog, Outputs.LogGroupName]
+        FlowLogLogGroupArn: !GetAtt [FlowLog, Outputs.LogGroupArn]
+        VpcCidr: !Ref VpcCidr
+        LambdaCodeBucket: !Ref AnomalyDetectorLambdaCodeBucket
+        LambdaCodePath: !Ref AnomalyDetectorLambdaCodePath
+        LambdaSecurityGroupIds: !Join [ ',', !Ref LambdaSecurityGroupIds ]
+        LambdaSubnetIds: !Join [ ',', !Ref LambdaSubnetIds ]
+        ListenerPort: !Ref ListenerPort
+        ListenerProtocol: !Ref ListenerProtocol
+        MetricsNamespace: !Ref MetricsNamespace
+        MinPacketsPerBin: !Ref MinPacketsPerBin
+        MinZScore: !Ref MinZScore
+      TemplateURL: !Sub "${TemplateUrlBase}/anomaly-detector/template.yaml"
+      TimeoutInMinutes: 10
+  MitigationDashboard:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        MaxNaclRules: !Ref MaxNaclRules
+        MinPacketsPerBin: !Ref MinPacketsPerBin
+        MinZScore: !Ref MinZScore
+        MetricsNamespace: !Ref MetricsNamespace
+        SubnetId1: !Ref SubnetId1
+        SubnetId2: !Ref SubnetId2
+        NaclLogGroup:
+          Fn::GetAtt:
+          - NaclUpdater
+          - Outputs.NaclLogGroup
+        FlowLogLogGroup:
+          Fn::GetAtt:
+          - FlowLog
+          - Outputs.LogGroupName
+      TemplateURL: !Sub "${TemplateUrlBase}/mitigation-dashboard/template.yaml"
+      TimeoutInMinutes: 10

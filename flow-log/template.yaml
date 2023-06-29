@@ -1,0 +1,143 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+  LogGroupRetentionInDays:
+    Type: Number
+    Default: 1
+  FlowLogFormat:
+    Type: String
+    Default: '${srcaddr} ${dstport} ${packets} ${action} ${subnet-id} ${protocol} ${flow-direction}'
+  ListenerPort:
+    Type: Number
+  ListenerProtocol:
+    Type: Number
+  MetricsNamespace:
+    Type: String
+Resources:
+  FlowLog1:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+      ResourceId: !Ref SubnetId1
+      ResourceType: Subnet
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref LogGroup
+      LogFormat: !Ref FlowLogFormat
+      MaxAggregationInterval: 60
+      TrafficType: ALL
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-flow-log'
+  FlowLog2:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+      ResourceId: !Ref SubnetId2
+      ResourceType: Subnet
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref LogGroup
+      LogFormat: !Ref FlowLogFormat
+      MaxAggregationInterval: 60
+      TrafficType: ALL
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-flow-log'
+  LogGroup:
+    Type: AWS::Logs::LogGroup 
+    Properties:
+      LogGroupName: !Sub '${AWS::StackName}-log-group'
+      RetentionInDays: !Ref LogGroupRetentionInDays
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+  LogGroupKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties: 
+      AliasName: !Sub 'alias/${AWS::StackName}-logs'
+      TargetKeyId: !Ref LogGroupKey
+  LogGroupKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CloudWatch Logs encryption key
+      EnableKeyRotation: true
+      PendingWindowInDays: 20
+      KeyPolicy:
+        Version: 2012-10-17
+        Statement:
+          - Sid: Enable IAM Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow CloudWatch Logs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:ReEncrypt
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                "kms:EncryptionContext:aws:logs:arn":
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AWS::StackName}-log-group"
+  RejectedPacketsMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterName: rejected-packets
+      FilterPattern: !Sub '[srcaddr, dstport=${ListenerPort}, packets, action=REJECT, subnet_id=${SubnetId1} || subnet_id=${SubnetId2}, protocol=${ListenerProtocol}, direction=ingress]'
+      LogGroupName: !Ref LogGroup
+      MetricTransformations:
+        - Dimensions:
+            - Key: SubnetId
+              Value: '$subnet_id'
+          MetricName: RejectedPackets
+          MetricNamespace: !Ref MetricsNamespace
+          MetricValue: '$packets'
+          Unit: Count
+  FlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Description: provide permission to publish flow logs
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${LogGroupKey}'
+              - Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}:log-stream:*'
+Outputs:
+  LogGroupName:
+    Value: !Ref LogGroup
+  LogGroupArn:
+    Value: !GetAtt LogGroup.Arn
