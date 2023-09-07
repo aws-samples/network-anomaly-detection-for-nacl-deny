@@ -1,6 +1,6 @@
 ## Automatically detect and block low-volume network floods
 
-This repository contains the solution referenced in the blog post "Automatically detect and block low-volume network floods".
+This repository contains the solution referenced in the blog post [Automatically detect and block low-volume network floods](https://aws.amazon.com/blogs/security/automatically-detect-and-block-low-volume-network-floods/).
 
 ## Security
 
