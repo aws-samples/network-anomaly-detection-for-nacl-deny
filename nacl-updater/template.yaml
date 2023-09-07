@@ -1,40 +1,54 @@
 ---
 AWSTemplateFormatVersion: 2010-09-09
+Description: Lambda function that manages deny rules in network ACLs
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
-  SubnetId1:
-    Type: AWS::EC2::Subnet::Id
-  SubnetId2:
-    Type: AWS::EC2::Subnet::Id
+    Description: ID of the VPC for your endpoint's subnets
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of subnet IDs for network ACLs apply.
   LambdaCodeBucket:
     Type: String
+    Description: Name of S3 bucket that contains Lambda code
   LambdaCodePath:
     Type: String
-  LambdaSecurityGroupIds:
-    Type: List<AWS::EC2::SecurityGroup::Id>
-  LambdaSubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
+    Description: S3 object key for Lambda code
   ListenerPort:
     Type: Number
     MinValue: 1
-  FlowLogLogGroupName:
-    Type: String
+    Description: Port number for your endpoint
   MaxNaclRules:
     Type: Number
     Default: 20
     AllowedValues: [20, 40]
+    Description: By default, NACLs support 20 ingress rules
+  NaclRuleNetworkMask:
+    Type: Number
+    Default: 32
+    MinValue: 0
+    MaxValue: 32
+    Description: Network mask used in each NACL deny rule
   MetricsNamespace:
     Type: String
+    Default: AutoNACL
+    Description: Namespace for custom CloudWatch metrics
   AllowListBucket:
     Type: String
     Default: ''
+    Description: Optional name of S3 bucket containing allow list
   AllowListKey:
     Type: String
     Default: ''
+    Description: Optional S3 object key for allow list
   FlowLogAnomaliesTopicArn:
     Type: String
     Description: ARN of the SNS topic notified of anomalous source IPs
+  RuleAction:
+    Type: String
+    Default: DENY
+    AllowedValues: ["DENY", "ALLOW"]
+    Description: Determines whether anomalous IPs are blocked or just reported.
 Conditions:
   AllowListBucketExists: !Not [!Equals [!Ref AllowListBucket, '']]
   AllowListKeyExists: !Not [!Equals [!Ref AllowListKey, '']]
@@ -44,6 +58,7 @@ Conditions:
 Resources:
   NetworkAclBlue:
     Type: AWS::EC2::NetworkAcl
+    DeletionPolicy: Retain
     Properties: 
       VpcId: !Ref VpcId
       Tags:
@@ -56,6 +71,7 @@ Resources:
           - id: W66
             reason: "Can't assume what protocols are in use for subnets"
     Type: AWS::EC2::NetworkAclEntry
+    DeletionPolicy: Retain
     Properties: 
       CidrBlock: 0.0.0.0/0
       Egress: true
@@ -70,6 +86,7 @@ Resources:
           - id: W66
             reason: "Can't assume what protocols are in use for subnets"
     Type: AWS::EC2::NetworkAclEntry
+    DeletionPolicy: Retain
     Properties: 
       CidrBlock: 0.0.0.0/0
       Egress: false
@@ -79,6 +96,7 @@ Resources:
       RuleNumber: 100
   NetworkAclGreen:
     Type: AWS::EC2::NetworkAcl
+    DeletionPolicy: Retain
     Properties: 
       VpcId: !Ref VpcId
       Tags:
@@ -91,6 +109,7 @@ Resources:
           - id: W66
             reason: "Can't assume what protocols are in use for subnets"
     Type: AWS::EC2::NetworkAclEntry
+    DeletionPolicy: Retain
     Properties: 
       CidrBlock: 0.0.0.0/0
       Egress: true
@@ -105,6 +124,7 @@ Resources:
           - id: W66
             reason: "Can't assume what protocols are in use for subnets"
     Type: AWS::EC2::NetworkAclEntry
+    DeletionPolicy: Retain
     Properties: 
       CidrBlock: 0.0.0.0/0
       Egress: false
@@ -184,8 +204,7 @@ Resources:
             Action:
               - ec2:ReplaceNetworkAclAssociation
             Resource:
-              - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${SubnetId1}'
-              - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${SubnetId2}'
+              - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*'
               - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-acl/*'
       Roles:
         - !Ref LambdaRole
@@ -238,11 +257,15 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
   Lambda:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "Not appropiate for use case"
     DependsOn: 
       - LambdaCloudWatchPolicy
       - LambdaEc2Policy
       - LambdaKmsPolicy
-      - LambdaAllowListPolicy
       - LambdaSnsPolicy
       - LambdaLogGroup
       - NaclLogStream
@@ -255,9 +278,6 @@ Resources:
       ReservedConcurrentExecutions: 1
       Runtime: python3.10
       Timeout: 10
-      VpcConfig:
-        SubnetIds: !Ref LambdaSubnetIds
-        SecurityGroupIds: !Ref LambdaSecurityGroupIds
       DeadLetterConfig:
         TargetArn: !GetAtt DeadLetterTopic.TopicArn
       Code:
@@ -267,15 +287,17 @@ Resources:
         Variables:
           NETWORK_ACL_BLUE: !Ref NetworkAclBlue
           NETWORK_ACL_GREEN: !Ref NetworkAclGreen
-          SUBNET_IDS: !Sub '${SubnetId1},${SubnetId2}'
-          FLOW_LOG_LOG_GROUP: !Ref FlowLogLogGroupName
+          VPC_ID: !Ref VpcId
+          SUBNET_IDS: !Join [ ',', !Ref SubnetIds ]
           NACL_LOG_GROUP: !Ref NaclLogGroup
           NACL_LOG_STREAM: !Ref NaclLogStream
           LISTENER_PORT: !Ref ListenerPort
           MAX_NACL_RULES: !Ref MaxNaclRules
+          NACL_RULE_NETWORK_MASK: !Ref NaclRuleNetworkMask
           METRICS_NAMESPACE: !Ref MetricsNamespace
           ALLOW_LIST_BUCKET: !If [AllowListExists, !Ref AllowListBucket, !Ref AWS::NoValue]
           ALLOW_LIST_KEY: !If [AllowListExists, !Ref AllowListKey, !Ref AWS::NoValue]
+          RULE_ACTION: !Ref RuleAction
   LambdaLogGroup:
     Type: AWS::Logs::LogGroup 
     Properties:

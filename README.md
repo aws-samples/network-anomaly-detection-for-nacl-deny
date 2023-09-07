@@ -1,5 +1,6 @@
-## Automatic network traffic flood mitigation using network ACLs
-This solution automates the management of NACL rules to deny traffic from source IPs that exceed a threshold. 
+## Automatically detect and block low-volume network floods
+
+This repository contains the solution referenced in the blog post "Automatically detect and block low-volume network floods".
 
 ## Security
 

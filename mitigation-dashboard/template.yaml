@@ -1,22 +1,38 @@
 ---
 AWSTemplateFormatVersion: 2010-09-09
+Description: CloudWatch dashboard that visualizes traffic managed by network ACL rules
 Parameters:
-  SubnetId1:
-    Type: AWS::EC2::Subnet::Id
-  SubnetId2:
-    Type: AWS::EC2::Subnet::Id
-  FlowLogLogGroup:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: ID of the VPC for your endpoint's subnets
+  ListenerPort:
+    Type: Number
+    Description: Port number for your endpoint
+  ListenerProtocol:
     Type: String
+    AllowedValues: ["UDP", "TCP"]
+    Description: Internet Protocol used by your application's listener
   NaclLogGroup:
     Type: String
+    Description: Name of CloudWatch log group where blocked IPs are logged
   MetricsNamespace:
     Type: String
+    Description: Namespace for custome CloudWatch metrics
   MaxNaclRules:
     Type: Number
+    AllowedValues: [20, 40]
+    Description: By default, NACLs support 20 ingress rules
+  NaclRuleNetworkMask:
+    Type: Number
+    MinValue: 0
+    MaxValue: 32
+    Description: Network mask used in each NACL deny rule
   MinPacketsPerBin:
     Type: Number
+    Description: Packet bins below this size will be ignored
   MinZScore:
     Type: Number
+    Description: Minimum Z-score for a source to be considered an anomaly
 Resources:
   MathLambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -60,4 +76,4 @@ Resources:
     Type: AWS::CloudWatch::Dashboard
     Properties:
       DashboardName: !Ref AWS::StackName
-      DashboardBody: !Sub "{\"widgets\":[{\"height\":7,\"width\":12,\"y\":0,\"x\":0,\"type\":\"metric\",\"properties\":{\"metrics\":[[{\"expression\":\"SUM([m1,m2])\",\"label\":\"RejectedPackets\",\"id\":\"e1\",\"region\":\"${AWS::Region}\"}],[\"${MetricsNamespace}\",\"RejectedPackets\",\"SubnetId\",\"${SubnetId1}\",{\"id\":\"m1\",\"visible\":false,\"region\":\"${AWS::Region}\"}],[\"...\",\"${SubnetId2}\",{\"id\":\"m2\",\"visible\":false,\"region\":\"${AWS::Region}\"}]],\"view\":\"timeSeries\",\"stacked\":false,\"region\":\"${AWS::Region}\",\"stat\":\"Sum\",\"period\":60,\"title\":\"Traffic\",\"yAxis\":{\"left\":{\"min\":0,\"showUnits\":false}},\"setPeriodToTimeRange\":true}},{\"height\":7,\"width\":12,\"y\":7,\"x\":0,\"type\":\"metric\",\"properties\":{\"metrics\":[[\"${MetricsNamespace}\",\"UnblockedSourceIPs\",\"LogGroupName\",\"${FlowLogLogGroup}\",{\"label\":\"[last: ${!LAST}] UnblockedAnomalousIPs\",\"region\":\"${AWS::Region}\",\"color\":\"#d62728\"}],[\".\",\"BlockedSourceIPs\",\".\",\".\",{\"label\":\"[last: ${!LAST}] BlockedAnomalousIPs\",\"region\":\"${AWS::Region}\",\"color\":\"#1f77b4\",\"yAxis\":\"left\"}]],\"view\":\"timeSeries\",\"stacked\":false,\"region\":\"${AWS::Region}\",\"stat\":\"Maximum\",\"period\":60,\"title\":\"Anomalous Source IPs\",\"yAxis\":{\"left\":{\"min\":0,\"showUnits\":false}},\"setPeriodToTimeRange\":true,\"annotations\":{\"horizontal\":[{\"label\":\"NACL Rule Limit\",\"value\":${AdjustedMaxNaclRules.Sum}}]}}},{\"height\":7,\"width\":12,\"y\":0,\"x\":12,\"type\":\"metric\",\"properties\":{\"metrics\":[[\"${MetricsNamespace}\",\"UniqueSourceIPs\",\"LogGroupName\",\"${FlowLogLogGroup}\",{\"label\":\"[last: ${!LAST}] UniqueSourceIPs\",\"region\":\"${AWS::Region}\"}]],\"view\":\"timeSeries\",\"stacked\":false,\"region\":\"${AWS::Region}\",\"title\":\"All Source IPs\",\"stat\":\"Maximum\",\"period\":60,\"yAxis\":{\"left\":{\"min\":0,\"label\":\"Source IPs\",\"showUnits\":false}},\"setPeriodToTimeRange\":true}},{\"type\":\"log\",\"x\":12,\"y\":7,\"width\":12,\"height\":7,\"properties\":{\"query\":\"SOURCE '${NaclLogGroup}' | fields @timestamp, ip, z_score, packets | stats max(z_score) as zscore, max(packets) as packets, max(@timestamp) as latest by bin (1h) as hour, ip | sort hour desc, zscore desc\",\"region\":\"${AWS::Region}\",\"stacked\":false,\"view\":\"table\",\"title\":\"Hourly Blocked Sources (min packets per bin: ${MinPacketsPerBin} | min zscore: ${MinZScore})\"}}]}"
+      DashboardBody: !Sub "{\"widgets\":[{\"height\":7,\"width\":12,\"y\":0,\"x\":0,\"type\":\"metric\",\"properties\":{\"metrics\":[[\"${MetricsNamespace}\",\"AllowedPackets\",\"VpcId\",\"${VpcId}\",{\"region\":\"${AWS::Region}\",\"color\":\"#1f77b4\",\"label\":\"[last: ${!LAST}] Allowed\"}],[\".\",\"RejectedPackets\",\".\",\".\",{\"region\":\"${AWS::Region}\",\"color\":\"#d62728\",\"label\":\"[last: ${!LAST}] Rejected\"}]],\"view\":\"timeSeries\",\"stacked\":true,\"region\":\"${AWS::Region}\",\"stat\":\"Sum\",\"period\":60,\"title\":\"Network Traffic (${ListenerProtocol}:${ListenerPort})\",\"yAxis\":{\"left\":{\"min\":0,\"showUnits\":false,\"label\":\"Packets\"}},\"setPeriodToTimeRange\":true}},{\"height\":7,\"width\":12,\"y\":7,\"x\":0,\"type\":\"metric\",\"properties\":{\"metrics\":[[\"${MetricsNamespace}\",\"BlockedSourceNetworks\",\"VpcId\",\"${VpcId}\",{\"label\":\"[last: ${!LAST}] Blocked Networks\",\"region\":\"${AWS::Region}\",\"color\":\"#d62728\",\"yAxis\":\"left\"}],[\".\",\"UnblockedSourceNetworks\",\".\",\".\",{\"label\":\"[last: ${!LAST}] Unblocked Networks\",\"region\":\"${AWS::Region}\",\"color\":\"#c7c7c7\"}]],\"view\":\"timeSeries\",\"stacked\":true,\"region\":\"${AWS::Region}\",\"stat\":\"Maximum\",\"period\":60,\"title\":\"Anomalous Source Networks (subnet mask: /${NaclRuleNetworkMask})\",\"yAxis\":{\"left\":{\"min\":0,\"showUnits\":false}},\"setPeriodToTimeRange\":true,\"annotations\":{\"horizontal\":[{\"label\":\"NACL Rule Limit\",\"value\":${AdjustedMaxNaclRules.Sum}}]}}},{\"height\":7,\"width\":12,\"y\":14,\"x\":0,\"type\":\"metric\",\"properties\":{\"metrics\":[[\"${MetricsNamespace}\",\"BlockedSourceIPs\",\"VpcId\",\"${VpcId}\",{\"label\":\"[last: ${!LAST}] Blocked IPs\",\"region\":\"${AWS::Region}\",\"color\":\"#d62728\",\"yAxis\":\"left\"}],[\".\",\"UnblockedSourceIPs\",\".\",\".\",{\"label\":\"[last: ${!LAST}] Unblocked IPs\",\"region\":\"${AWS::Region}\",\"color\":\"#c7c7c7\"}]],\"view\":\"timeSeries\",\"stacked\":true,\"region\":\"${AWS::Region}\",\"stat\":\"Maximum\",\"period\":60,\"title\":\"Anomalous Source IPs\",\"yAxis\":{\"left\":{\"min\":0,\"showUnits\":false}},\"setPeriodToTimeRange\":true}},{\"height\":7,\"width\":12,\"y\":0,\"x\":12,\"type\":\"metric\",\"properties\":{\"metrics\":[[\"${MetricsNamespace}\",\"UniqueSourceIPs\",\"VpcId\",\"${VpcId}\",{\"label\":\"[last: ${!LAST}] Source IPs\",\"region\":\"${AWS::Region}\"}]],\"view\":\"timeSeries\",\"stacked\":false,\"region\":\"${AWS::Region}\",\"title\":\"All Source IPs\",\"stat\":\"Maximum\",\"period\":60,\"yAxis\":{\"left\":{\"min\":0,\"showUnits\":false}},\"setPeriodToTimeRange\":true}},{\"height\":7,\"width\":12,\"y\":7,\"x\":12,\"type\":\"metric\",\"properties\":{\"metrics\":[[\"${MetricsNamespace}\",\"PacketBinAverage\",\"VpcId\",\"${VpcId}\",{\"label\":\"[last: ${!LAST}] Average\",\"region\":\"${AWS::Region}\"}],[\".\",\"PacketBinStandardDeviation\",\".\",\".\",{\"label\":\"[last: ${!LAST}] Standard Deviation\"}],[\".\",\"PacketBinAnomalyThreshold\",\".\",\".\",{\"label\":\"[last: ${!LAST}] Anomaly Threshold\"}]],\"view\":\"timeSeries\",\"stacked\":false,\"region\":\"${AWS::Region}\",\"yAxis\":{\"left\":{\"min\":0,\"showUnits\":false,\"label\":\"Packets/Minute\"}},\"stat\":\"Maximum\",\"period\":60,\"title\":\"Packet Statistics\"}},{\"height\":7,\"width\":12,\"type\":\"log\",\"x\":12,\"y\":14,\"properties\":{\"query\":\"SOURCE '${NaclLogGroup}' | fields @timestamp, ip, z_score, packets | stats max(z_score) as zscore, max(packets) as packets, max(@timestamp) as peak by bin (1h) as hour, ip | sort hour desc, zscore desc | dedup ip\",\"region\":\"${AWS::Region}\",\"stacked\":false,\"view\":\"table\",\"title\":\"Blocked IPs (min packets/minute: ${MinPacketsPerBin} | min zscore: ${MinZScore})\"}}]}"

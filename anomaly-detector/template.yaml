@@ -1,38 +1,48 @@
 ---
 AWSTemplateFormatVersion: 2010-09-09
+Description: Lambda function that detects and reports anomalous source IPs
 Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: ID of the VPC for your endpoint's subnets
   FlowLogLogGroupArn:
     Type: String
+    Description: ARN of the CloudWatch log group used for VPC flow logs
   FlowLogLogGroupName:
     Type: String
-  VpcCidr:
-    Type: String
+    Description: Name of the CloudWatch log group used for VPC flow logs
   LambdaCodeBucket:
     Type: String
+    Description: Name of S3 bucket that contains Lambda code
   LambdaCodePath:
     Type: String
-  LambdaSecurityGroupIds:
-    Type: List<AWS::EC2::SecurityGroup::Id>
-  LambdaSubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
+    Description: Prefix of the Lambda code archive
   ListenerPort:
     Type: Number
-  ListenerProtocol:
+    Description: Port number for your endpoint
+  ListenerProtocolNumber:
     Type: Number
+    AllowedValues: [6, 17]
+    Description: IANA Internet Protocol used by your application's listener
   MinPacketsPerBin:
     Type: Number
     Default: 12000
+    Description: Packet bins below this size will be ignored
   TimeWindowSeconds:
     Type: Number
     Default: 3600
+    Description: Size of window during which statistical anomalies are calculated
   BinSeconds:
     Type: Number
     Default: 60
+    Description: Size of window for each packet bin
   MinZScore:
     Type: Number
     Default: 3.0
+    Description: Minimum Z-score for a source to be considered an anomaly
   MetricsNamespace:
     Type: String
+    Description: Namespace used for custom CloudWatch metrics
 Resources:
   FlowLogAnomaliesTopic:
     Type: AWS::SNS::Topic
@@ -149,6 +159,11 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
   Lambda:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "Not appropiate for use case"
     DependsOn: 
       - LambdaKmsPolicy
       - LambdaLogsPolicy
@@ -168,17 +183,14 @@ Resources:
       Code:
         S3Bucket: !Ref LambdaCodeBucket
         S3Key: !Ref LambdaCodePath
-      VpcConfig:
-        SubnetIds: !Ref LambdaSubnetIds
-        SecurityGroupIds: !Ref LambdaSecurityGroupIds
       DeadLetterConfig:
         TargetArn: !GetAtt DeadLetterTopic.TopicArn
       Environment:
         Variables:
-          VPC_CIDR: !Ref VpcCidr
+          VPC_ID: !Ref VpcId
           LOG_GROUP_NAME: !Ref FlowLogLogGroupName
           LISTENER_PORT: !Ref ListenerPort
-          LISTENER_PROTOCOL: !Ref ListenerProtocol
+          LISTENER_PROTOCOL: !Ref ListenerProtocolNumber
           MIN_PACKETS_PER_BIN: !Ref MinPacketsPerBin
           TIME_WINDOW_SECONDS: !Ref TimeWindowSeconds
           BIN_SECONDS: !Ref BinSeconds

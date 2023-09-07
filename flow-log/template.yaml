@@ -1,51 +1,53 @@
 ---
 AWSTemplateFormatVersion: 2010-09-09
+Description: VPC flow logs required for automation of network ACL rules
+Transform: 'AWS::LanguageExtensions'
 Parameters:
-  SubnetId1:
-    Type: AWS::EC2::Subnet::Id
-  SubnetId2:
-    Type: AWS::EC2::Subnet::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of subnet IDs for which you need flow logs.
   LogGroupRetentionInDays:
     Type: Number
     Default: 1
+    Description: Limit the retention of flow logs to optimize cost.
   FlowLogFormat:
     Type: String
-    Default: '${srcaddr} ${dstport} ${packets} ${action} ${subnet-id} ${protocol} ${flow-direction}'
+    Default: '${srcaddr} ${dstport} ${packets} ${action} ${protocol} ${flow-direction} ${vpc-id}'
+    Description: Minimum set of flow log fields required for anomaly detection.
   ListenerPort:
     Type: Number
-  ListenerProtocol:
+    Description: Port number for your endpoint
+  ListenerProtocolNumber:
     Type: Number
+    Description: IANA protocol number for your endpoint
   MetricsNamespace:
     Type: String
+    Description: Namespace for custom CloudWatch metric for rejected packets
 Resources:
-  FlowLog1:
-    Type: AWS::EC2::FlowLog
-    Properties:
-      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
-      ResourceId: !Ref SubnetId1
-      ResourceType: Subnet
-      LogDestinationType: cloud-watch-logs
-      LogGroupName: !Ref LogGroup
-      LogFormat: !Ref FlowLogFormat
-      MaxAggregationInterval: 60
-      TrafficType: ALL
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-flow-log'
-  FlowLog2:
-    Type: AWS::EC2::FlowLog
-    Properties:
-      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
-      ResourceId: !Ref SubnetId2
-      ResourceType: Subnet
-      LogDestinationType: cloud-watch-logs
-      LogGroupName: !Ref LogGroup
-      LogFormat: !Ref FlowLogFormat
-      MaxAggregationInterval: 60
-      TrafficType: ALL
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-flow-log'
+  'Fn::ForEach::FlowLogs':
+    - SubnetId
+    # remove "subnet-" from each subnet ID so it can be used in logical ID
+    - !Split
+      - ','
+      -  !Join
+        - ''
+        - !Split
+          - 'subnet-'
+          - !Join [ ',', !Ref SubnetIds ]
+    - '${SubnetId}FlowLog':
+        Type: AWS::EC2::FlowLog
+        Properties:
+          DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+          ResourceId: !Sub 'subnet-${SubnetId}'
+          ResourceType: Subnet
+          LogDestinationType: cloud-watch-logs
+          LogGroupName: !Ref LogGroup
+          LogFormat: !Ref FlowLogFormat
+          MaxAggregationInterval: 60
+          TrafficType: ALL
+          Tags:
+            - Key: Name
+              Value: !Sub '${AWS::StackName}-flow-log'
   LogGroup:
     Type: AWS::Logs::LogGroup 
     Properties:
@@ -91,13 +93,27 @@ Resources:
     Type: AWS::Logs::MetricFilter
     Properties:
       FilterName: rejected-packets
-      FilterPattern: !Sub '[srcaddr, dstport=${ListenerPort}, packets, action=REJECT, subnet_id=${SubnetId1} || subnet_id=${SubnetId2}, protocol=${ListenerProtocol}, direction=ingress]'
+      FilterPattern: !Sub '[srcaddr, dstport=${ListenerPort}, packets, action=REJECT, protocol=${ListenerProtocolNumber}, direction=ingress, vpc_id]'
       LogGroupName: !Ref LogGroup
       MetricTransformations:
         - Dimensions:
-            - Key: SubnetId
-              Value: '$subnet_id'
+            - Key: VpcId
+              Value: '$vpc_id'
           MetricName: RejectedPackets
+          MetricNamespace: !Ref MetricsNamespace
+          MetricValue: '$packets'
+          Unit: Count
+  AllowedPacketsMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterName: allowed-packets
+      FilterPattern: !Sub '[srcaddr, dstport=${ListenerPort}, packets, action=ACCEPT, protocol=${ListenerProtocolNumber}, direction=ingress, vpc_id]'
+      LogGroupName: !Ref LogGroup
+      MetricTransformations:
+        - Dimensions:
+            - Key: VpcId
+              Value: '$vpc_id'
+          MetricName: AllowedPackets
           MetricNamespace: !Ref MetricsNamespace
           MetricValue: '$packets'
           Unit: Count

@@ -1,118 +1,155 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: A solution that automates the lifecycle of NACL rules
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "Required: network configuration for your application"
+        Parameters: 
+          - VpcId
+          - SubnetIds
+          - ListenerPort
+          - ListenerProtocol
+      - 
+        Label: 
+          default: "Required: S3 location for CloudFormation and Lambda resources"
+        Parameters: 
+          - SourceCodeS3Bucket
+          - SourceCodeS3Prefix
+      - 
+        Label: 
+          default: "Optional: default configuration parameters"
+        Parameters: 
+          - MaxNaclRules
+          - NaclRuleNetworkMask
+          - MetricsNamespace
+          - AllowListBucket
+          - AllowListKey
+          - MinPacketsPerBin
+          - MinZScore
+          - RuleAction
+Mappings:
+  ProtocolMap:
+    IANA:
+      TCP: 6
+      UDP: 17
 Parameters:
-  TemplateUrlBase:
+  SourceCodeS3Bucket:
     Type: String
+    Description: Name of S3 bucket that contains CloudFormation templates and Lambda code
+  SourceCodeS3Prefix:
+    Type: String
+    Description: Prefix (folder) of the CloudFormation templates and Lambda code
   VpcId:
     Type: AWS::EC2::VPC::Id
-  VpcCidr:
-    Type: String
-  SubnetId1:
-    Type: AWS::EC2::Subnet::Id
-  SubnetId2:
-    Type: AWS::EC2::Subnet::Id
-  AnomalyDetectorLambdaCodeBucket:
-    Type: String
-  AnomalyDetectorLambdaCodePath:
-    Type: String
-  NaclUpdaterLambdaCodeBucket:
-    Type: String
-  NaclUpdaterLambdaCodePath:
-    Type: String
-  LambdaSecurityGroupIds:
-    Type: List<AWS::EC2::SecurityGroup::Id>
-  LambdaSubnetIds:
+    Description: ID of the VPC for your endpoint's subnets
+  SubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
+    Description: List of subnet IDs used by your endpoint
   ListenerPort:
     Type: Number
+    Description: Port number for your endpoint
   ListenerProtocol:
-    Type: Number
-    Default: 6
-    Description: IANA protocol number
+    Type: String
+    AllowedValues: ["UDP", "TCP"]
+    Description: Internet Protocol used by your application's listener
   MaxNaclRules:
     Type: Number
     Default: 20
+    AllowedValues: [20, 40]
+    Description: By default, NACLs support 20 ingress rules
+  NaclRuleNetworkMask:
+    Type: Number
+    Default: 32
+    MinValue: 0
+    MaxValue: 32
+    Description: Network mask used in each NACL deny rule
   MetricsNamespace:
     Type: String
+    Default: AutoNACL
+    Description: Namespace for custom CloudWatch metrics
   AllowListBucket:
     Type: String
     Default: ''
+    Description: Optional name of S3 bucket containing allow list
   AllowListKey:
     Type: String
     Default: ''
+    Description: Optional S3 object key for allow list
   MinPacketsPerBin:
     Type: Number
     Default: 12000
+    Description: Packet bins below this size will be ignored
   MinZScore:
     Type: Number
     Default: 3.0
+    Description: Minimum Z-score for a source to be considered an anomaly
+  RuleAction:
+    Type: String
+    Default: DENY
+    AllowedValues: ["DENY", "ALLOW"]
+    Description: Determines whether anomalous IPs are blocked or just reported
 Resources:
   NaclUpdater:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
         VpcId: !Ref VpcId
-        SubnetId1: !Ref SubnetId1
-        SubnetId2: !Ref SubnetId2
-        LambdaCodeBucket: !Ref NaclUpdaterLambdaCodeBucket
-        LambdaCodePath: !Ref NaclUpdaterLambdaCodePath
-        LambdaSecurityGroupIds: !Join [ ',', !Ref LambdaSecurityGroupIds ]
-        LambdaSubnetIds: !Join [ ',', !Ref LambdaSubnetIds ]
+        SubnetIds: !Join [ ',', !Ref SubnetIds ]
+        LambdaCodeBucket: !Ref SourceCodeS3Bucket
+        LambdaCodePath: !Sub "${SourceCodeS3Prefix}/nacl-updater/lambda.zip"
         ListenerPort: !Ref ListenerPort
         MaxNaclRules: !Ref MaxNaclRules
+        NaclRuleNetworkMask: !Ref NaclRuleNetworkMask
         MetricsNamespace: !Ref MetricsNamespace
         AllowListBucket: !Ref AllowListBucket
         AllowListKey: !Ref AllowListKey
         FlowLogAnomaliesTopicArn: !GetAtt [AnomalyDetector, Outputs.FlowLogAnomaliesTopicArn]
-        FlowLogLogGroupName: !GetAtt [FlowLog, Outputs.LogGroupName]
-      TemplateURL: !Sub "${TemplateUrlBase}/nacl-updater/template.yaml"
+        RuleAction: !Ref RuleAction
+      TemplateURL: !Sub "https://${SourceCodeS3Bucket}.s3.${AWS::Region}.amazonaws.com/${SourceCodeS3Prefix}/nacl-updater/template.yaml"
       TimeoutInMinutes: 10
   FlowLog:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
-        SubnetId1: !Ref SubnetId1
-        SubnetId2: !Ref SubnetId2
+        SubnetIds: !Join [ ',', !Ref SubnetIds ]
         ListenerPort: !Ref ListenerPort
-        ListenerProtocol: !Ref ListenerProtocol
+        ListenerProtocolNumber: !FindInMap [ProtocolMap, IANA, !Ref ListenerProtocol ]
         MetricsNamespace: !Ref MetricsNamespace
-      TemplateURL: !Sub "${TemplateUrlBase}/flow-log/template.yaml"
+      TemplateURL: !Sub "https://${SourceCodeS3Bucket}.s3.${AWS::Region}.amazonaws.com/${SourceCodeS3Prefix}/flow-log/template.yaml"
       TimeoutInMinutes: 10
   AnomalyDetector:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
+        VpcId: !Ref VpcId
         FlowLogLogGroupName: !GetAtt [FlowLog, Outputs.LogGroupName]
         FlowLogLogGroupArn: !GetAtt [FlowLog, Outputs.LogGroupArn]
-        VpcCidr: !Ref VpcCidr
-        LambdaCodeBucket: !Ref AnomalyDetectorLambdaCodeBucket
-        LambdaCodePath: !Ref AnomalyDetectorLambdaCodePath
-        LambdaSecurityGroupIds: !Join [ ',', !Ref LambdaSecurityGroupIds ]
-        LambdaSubnetIds: !Join [ ',', !Ref LambdaSubnetIds ]
+        LambdaCodeBucket: !Ref SourceCodeS3Bucket
+        LambdaCodePath: !Sub "${SourceCodeS3Prefix}/anomaly-detector/lambda.zip"
         ListenerPort: !Ref ListenerPort
-        ListenerProtocol: !Ref ListenerProtocol
+        ListenerProtocolNumber: !FindInMap [ProtocolMap, IANA, !Ref ListenerProtocol ]
         MetricsNamespace: !Ref MetricsNamespace
         MinPacketsPerBin: !Ref MinPacketsPerBin
         MinZScore: !Ref MinZScore
-      TemplateURL: !Sub "${TemplateUrlBase}/anomaly-detector/template.yaml"
+      TemplateURL: !Sub "https://${SourceCodeS3Bucket}.s3.${AWS::Region}.amazonaws.com/${SourceCodeS3Prefix}/anomaly-detector/template.yaml"
       TimeoutInMinutes: 10
   MitigationDashboard:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
+        ListenerPort: !Ref ListenerPort
+        ListenerProtocol: !Ref ListenerProtocol
         MaxNaclRules: !Ref MaxNaclRules
+        NaclRuleNetworkMask: !Ref NaclRuleNetworkMask
         MinPacketsPerBin: !Ref MinPacketsPerBin
         MinZScore: !Ref MinZScore
         MetricsNamespace: !Ref MetricsNamespace
-        SubnetId1: !Ref SubnetId1
-        SubnetId2: !Ref SubnetId2
         NaclLogGroup:
           Fn::GetAtt:
           - NaclUpdater
           - Outputs.NaclLogGroup
-        FlowLogLogGroup:
-          Fn::GetAtt:
-          - FlowLog
-          - Outputs.LogGroupName
-      TemplateURL: !Sub "${TemplateUrlBase}/mitigation-dashboard/template.yaml"
+        VpcId: !Ref VpcId
+      TemplateURL: !Sub "https://${SourceCodeS3Bucket}.s3.${AWS::Region}.amazonaws.com/${SourceCodeS3Prefix}/mitigation-dashboard/template.yaml"
       TimeoutInMinutes: 10

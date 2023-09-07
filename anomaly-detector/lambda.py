@@ -15,11 +15,11 @@ import botocore
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-# ignore source IPs in VPC CIDR
-VPC_CIDR = os.environ['VPC_CIDR']
-
 # name of log group used for VPC flow logs
 LOG_GROUP_NAME = os.environ['LOG_GROUP_NAME']
+
+# Used for CloudWatch metrics dimension
+VPC_ID = os.environ['VPC_ID']
 
 # only monitor traffic on this port
 LISTENER_PORT = int(os.environ['LISTENER_PORT'])
@@ -123,7 +123,45 @@ def update_bin_time_series(packet_bins):
             log.error(error)
 
 
-def get_outlier_info(now_time):
+def get_timestream_result_list(result):
+    """Convert native Timestream result into a list of maps."""
+    result_list = []
+    columns = list(map(lambda c: c['Name'], result['ColumnInfo']))
+    for row in result['Rows']:
+        cell = {}
+        for i in range(0, len(row['Data'])):
+            cell[columns[i]] = row['Data'][i]['ScalarValue']
+        result_list.append(cell)
+
+    return result_list
+
+
+def get_bin_stats(now_time):
+    """Query Timestream to calculate bin statistics."""
+    # determine the beginning of our time window, which is the very
+    # beginning of the minute that occurred 5 minutes ago
+    # e.g. if the time is 08:10:04 then our start time is 08:05:00
+
+    offset = TIME_WINDOW_SECONDS + (now_time % BIN_SECONDS)
+    start_ms = (now_time - offset) * 1000
+
+    # calculate the average and standard deviation across all bins
+    # during the past TIME_WINDOW_SECONDS (1 hour)
+
+    query = (
+        f'SELECT AVG(measure_value::bigint) AS bin_avg, '  # nosec B608
+        f'       STDDEV_POP(measure_value::bigint) AS bin_stddev '
+        f'FROM "{DATABASE_NAME}"."{DATABASE_TABLE}" '
+        f'WHERE measure_name = \'packets\' AND '
+        f'      time >= from_milliseconds({start_ms}) '
+    )
+
+    result = query_client.query(QueryString=query)
+    bin_stats = get_timestream_result_list(result)[0]
+    return float(bin_stats['bin_avg']), float(bin_stats['bin_stddev'])
+
+
+def get_outlier_info(now_time, bin_avg, bin_stddev):
     """Query Timestream to detect anomalous source IPs."""
     # determine the beginning of our time window, which is the very
     # beginning of the minute that occurred 5 minutes ago
@@ -139,16 +177,10 @@ def get_outlier_info(now_time):
 
     query = (
         f'WITH zscores AS ( '  # nosec B608
-        f'  WITH bin_stats AS ( '
-        f'    SELECT AVG(measure_value::bigint) AS bin_avg, '
-        f'           STDDEV_POP(measure_value::bigint) AS bin_stddev '
-        f'    FROM "{DATABASE_NAME}"."{DATABASE_TABLE}" '
-        f'    WHERE measure_name = \'packets\' AND '
-        f'          time >= from_milliseconds({start_ms}) '
-        f'  ) '
         f'  SELECT time, source_ip, measure_value::bigint as packets, '
-        f'         (measure_value::bigint - bin_avg) / bin_stddev as zscore '
-        f'  FROM "{DATABASE_NAME}"."{DATABASE_TABLE}", bin_stats '
+        f'         (measure_value::bigint - {bin_avg}) / {bin_stddev} '
+        f'         as zscore '
+        f'  FROM "{DATABASE_NAME}"."{DATABASE_TABLE}" '
         f'  WHERE time >= from_milliseconds({start_ms}) AND '
         f'        measure_name = \'packets\' '
         f') '
@@ -163,18 +195,7 @@ def get_outlier_info(now_time):
     )
 
     result = query_client.query(QueryString=query)
-
-    # convert native Timestream result into a list of maps
-
-    result_list = []
-    columns = list(map(lambda c: c['Name'], result['ColumnInfo']))
-    for row in result['Rows']:
-        cell = {}
-        for i in range(0, len(row['Data'])):
-            cell[columns[i]] = row['Data'][i]['ScalarValue']
-        result_list.append(cell)
-
-    return result_list
+    return get_timestream_result_list(result)
 
 
 def query_logs(start_time, query):
@@ -247,10 +268,12 @@ def get_packet_bins(start_time):
 
     query = (
         f'filter dstPort = {LISTENER_PORT:d} |'
+        f'filter protocol = {LISTENER_PROTOCOL:d} |'
         f'filter action = "ACCEPT" |'
         f'filter flowDirection = "ingress" |'
-        f'filter protocol = {LISTENER_PROTOCOL:d} |'
-        f'filter not isIpInSubnet(srcAddr, "{VPC_CIDR}") |'
+        f'filter not isIpInSubnet(srcAddr, "10.0.0.0/8") |'
+        f'filter not isIpInSubnet(srcAddr, "172.16.0.0/12") |'
+        f'filter not isIpInSubnet(srcAddr, "192.168.0.0/16") |'
         f'stats sum(packets) as packet_count '
         f'      by bin ({BIN_SECONDS:d}s) as bin_ts, srcAddr |'
         f'order by bin_ts desc |'
@@ -280,8 +303,10 @@ def handler(event, context):
 
     # find statistical anomalies
 
-    outlier_info = get_outlier_info(now_time)
-    log.info('outliers: %s', outlier_info)
+    bin_avg, bin_stddev = get_bin_stats(now_time)
+    bin_anomaly_threshold = (MIN_ZSCORE * bin_stddev) + bin_avg
+    outlier_info = get_outlier_info(now_time, bin_avg, bin_stddev)
+    log.info('outliers: %d', len(outlier_info))
 
     # publish message to SNS topic
 
@@ -297,8 +322,8 @@ def handler(event, context):
                 'MetricName': 'TimeWindow',
                 'Dimensions': [
                     {
-                        'Name': 'LogGroupName',
-                        'Value': LOG_GROUP_NAME
+                        'Name': 'VpcId',
+                        'Value': VPC_ID
                     }
                 ],
                 'Timestamp': metrics_ts,
@@ -310,8 +335,8 @@ def handler(event, context):
                 'MetricName': 'BinInterval',
                 'Dimensions': [
                     {
-                        'Name': 'LogGroupName',
-                        'Value': LOG_GROUP_NAME
+                        'Name': 'VpcId',
+                        'Value': VPC_ID
                     }
                 ],
                 'Timestamp': metrics_ts,
@@ -323,8 +348,8 @@ def handler(event, context):
                 'MetricName': 'MinPacketsPerBin',
                 'Dimensions': [
                     {
-                        'Name': 'LogGroupName',
-                        'Value': LOG_GROUP_NAME
+                        'Name': 'VpcId',
+                        'Value': VPC_ID
                     }
                 ],
                 'Timestamp': metrics_ts,
@@ -336,8 +361,8 @@ def handler(event, context):
                 'MetricName': 'OutlierSourceIPs',
                 'Dimensions': [
                     {
-                        'Name': 'LogGroupName',
-                        'Value': LOG_GROUP_NAME
+                        'Name': 'VpcId',
+                        'Value': VPC_ID
                     }
                 ],
                 'Timestamp': metrics_ts,
@@ -349,12 +374,51 @@ def handler(event, context):
                 'MetricName': 'UniqueSourceIPs',
                 'Dimensions': [
                     {
-                        'Name': 'LogGroupName',
-                        'Value': LOG_GROUP_NAME
+                        'Name': 'VpcId',
+                        'Value': VPC_ID
                     }
                 ],
                 'Timestamp': metrics_ts,
                 'Value': len(unique_source_ips),
+                'Unit': 'Count',
+                'StorageResolution': 1
+            },
+            {
+                'MetricName': 'PacketBinAverage',
+                'Dimensions': [
+                    {
+                        'Name': 'VpcId',
+                        'Value': VPC_ID
+                    }
+                ],
+                'Timestamp': metrics_ts,
+                'Value': bin_avg,
+                'Unit': 'Count',
+                'StorageResolution': 1
+            },
+            {
+                'MetricName': 'PacketBinStandardDeviation',
+                'Dimensions': [
+                    {
+                        'Name': 'VpcId',
+                        'Value': VPC_ID
+                    }
+                ],
+                'Timestamp': metrics_ts,
+                'Value': bin_stddev,
+                'Unit': 'Count',
+                'StorageResolution': 1
+            },
+            {
+                'MetricName': 'PacketBinAnomalyThreshold',
+                'Dimensions': [
+                    {
+                        'Name': 'VpcId',
+                        'Value': VPC_ID
+                    }
+                ],
+                'Timestamp': metrics_ts,
+                'Value': bin_anomaly_threshold,
                 'Unit': 'Count',
                 'StorageResolution': 1
             }
